@@ -6,6 +6,9 @@ $(if $(HOSTNAME),,$(error Failed to determine hostname: both 'hostname' and 'hos
 
 expectedMigration := $(shell ./../../scripts/get-latest-migration.sh)
 
+# TARGET_ARCH overrides the build architecture (e.g. TARGET_ARCH=amd64 on arm64 host)
+BUILD_ARCH ?= $(or $(TARGET_ARCH),$(shell go env GOARCH))
+
 ifeq ($(PROVIDER),aws)
 	REGISTRY_PREFIX := $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(PREFIX)core
 else

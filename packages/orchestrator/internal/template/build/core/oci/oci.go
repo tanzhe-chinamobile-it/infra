@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -61,9 +60,12 @@ func (e *ImageTooLargeError) Error() string {
 	)
 }
 
-var DefaultPlatform = containerregistry.Platform{
-	OS:           "linux",
-	Architecture: runtime.GOARCH,
+// DefaultPlatform returns the OCI platform for image pulls, respecting TARGET_ARCH.
+func DefaultPlatform() containerregistry.Platform {
+	return containerregistry.Platform{
+		OS:           "linux",
+		Architecture: utils.TargetArch(),
+	}
 }
 
 // wrapImagePullError converts technical Docker registry errors into user-friendly messages.
@@ -101,7 +103,7 @@ func GetPublicImage(ctx context.Context, dockerhubRepository dockerhub.RemoteRep
 		return nil, fmt.Errorf("invalid image reference '%s': %w", tag, err)
 	}
 
-	platform := DefaultPlatform
+	platform := DefaultPlatform()
 
 	// When no auth provider is provided and the image is from the default registry
 	// use docker remote repository proxy with cached images
@@ -154,7 +156,7 @@ func GetImage(ctx context.Context, artifactRegistry artifactsregistry.ArtifactsR
 	childCtx, childSpan := tracer.Start(ctx, "pull-docker-image")
 	defer childSpan.End()
 
-	platform := DefaultPlatform
+	platform := DefaultPlatform()
 
 	img, err := artifactRegistry.GetImage(childCtx, templateId, buildId, platform)
 	if err != nil {
