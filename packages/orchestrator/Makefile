@@ -10,6 +10,9 @@ $(if $(HOSTNAME),,$(error Failed to determine hostname: both 'hostname' and 'hos
 # Architecture for builds. Defaults to local arch; override for cross-compilation
 # (e.g., BUILD_ARCH=amd64 make build from an ARM64 host).
 BUILD_ARCH ?= $(shell go env GOARCH)
+# Docker platform string. Override for multi-arch builds:
+#   BUILD_PLATFORM=linux/amd64,linux/arm64 make build
+BUILD_PLATFORM ?= linux/$(BUILD_ARCH)
 
 .PHONY: init
 init:
@@ -22,7 +25,7 @@ generate:
 .PHONY: build
 build:
 	$(eval COMMIT_SHA := $(shell git rev-parse --short HEAD))
-	@docker build --platform linux/$(BUILD_ARCH) --output=bin --build-arg COMMIT_SHA="$(COMMIT_SHA)" -f ./Dockerfile ..
+	@docker build --platform $(BUILD_PLATFORM) --output=bin --build-arg COMMIT_SHA="$(COMMIT_SHA)" -f ./Dockerfile ..
 
 .PHONY: build-local
 build-local: fetch-busybox
@@ -109,7 +112,7 @@ test-docker:
 	@cp -r ../shared .shared/
 	@rm -rf .clickhouse/
 	@cp -r ../clickhouse .clickhouse/
-	@docker build --platform linux/$(BUILD_ARCH) -f test.Dockerfile --no-cache-filter runner --progress=plain -t orchestrator-test .
+	@docker build --platform $(BUILD_PLATFORM) -f test.Dockerfile --no-cache-filter runner --progress=plain -t orchestrator-test .
 	@rm -rf .shared/
 	@rm -rf .clickhouse/
 	@echo "Done"

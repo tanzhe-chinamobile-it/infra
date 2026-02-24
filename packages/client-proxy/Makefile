@@ -7,6 +7,9 @@ $(if $(HOSTNAME),,$(error Failed to determine hostname: both 'hostname' and 'hos
 # Architecture for builds. Defaults to local arch; override for cross-compilation
 # (e.g., BUILD_ARCH=amd64 make build-and-upload from an ARM64 host).
 BUILD_ARCH ?= $(shell go env GOARCH)
+# Docker platform string. Override for multi-arch builds:
+#   BUILD_PLATFORM=linux/amd64,linux/arm64 make build-and-upload
+BUILD_PLATFORM ?= linux/$(BUILD_ARCH)
 
 ifeq ($(PROVIDER),aws)
 	IMAGE_REGISTRY := $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(PREFIX)core/client-proxy
@@ -28,7 +31,7 @@ build-debug:
 .PHONY: build-and-upload
 build-and-upload:
 	$(eval COMMIT_SHA := $(shell git rev-parse --short HEAD))
-	@docker buildx build --platform linux/$(BUILD_ARCH) --tag $(IMAGE_REGISTRY) --push --build-arg COMMIT_SHA="$(COMMIT_SHA)" -f ./Dockerfile ..
+	@docker buildx build --platform $(BUILD_PLATFORM) --tag $(IMAGE_REGISTRY) --push --build-arg COMMIT_SHA="$(COMMIT_SHA)" -f ./Dockerfile ..
 
 .PHONY: run
 run:
