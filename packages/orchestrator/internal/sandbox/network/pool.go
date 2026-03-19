@@ -67,6 +67,11 @@ type Config struct {
 	SandboxTCPFirewallHTTPPort  uint16 `env:"SANDBOX_TCP_FIREWALL_HTTP_PORT"  envDefault:"5016"`
 	SandboxTCPFirewallTLSPort   uint16 `env:"SANDBOX_TCP_FIREWALL_TLS_PORT"   envDefault:"5017"`
 	SandboxTCPFirewallOtherPort uint16 `env:"SANDBOX_TCP_FIREWALL_OTHER_PORT" envDefault:"5018"`
+
+	// EgressNATInterface is the tunnel interface for routing non-TCP stable egress traffic.
+	// When set (e.g. "egress-tun"), non-TCP packets from sandboxes with stable egress
+	// are marked and policy-routed through this interface. Empty = disabled.
+	EgressNATInterface string `env:"EGRESS_NAT_INTERFACE" envDefault:""`
 }
 
 func ParseConfig() (Config, error) {

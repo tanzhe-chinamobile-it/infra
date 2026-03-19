@@ -32,6 +32,8 @@ type Proxy struct {
 	tlsPort   uint16 // For port 443 traffic - TLS SNI inspection
 	otherPort uint16 // For all other ports - CIDR-only, no protocol inspection
 
+	socks5Dialers socks5DialerCache
+
 	proxy *tcpproxy.Proxy
 }
 
@@ -85,16 +87,16 @@ func (p *Proxy) Start(ctx context.Context) error {
 	otherAddr := fmt.Sprintf("0.0.0.0:%d", p.otherPort)
 
 	// HTTP listener (port 80 traffic): inspect Host header for domain allowlist
-	p.proxy.AddHTTPHostMatchRoute(httpAddr, func(_ context.Context, _ string) bool { return true }, newConnectionHandler(ctx, domainHandler, ProtocolHTTP, p.metrics, p.limiter, p.logger, p.sandboxes, p.featureFlags))
-	p.proxy.AddRoute(httpAddr, newConnectionHandler(ctx, cidrOnlyHandler, ProtocolHTTP, p.metrics, p.limiter, p.logger, p.sandboxes, p.featureFlags))
+	p.proxy.AddHTTPHostMatchRoute(httpAddr, func(_ context.Context, _ string) bool { return true }, p.newConnectionHandler(ctx, domainHandler, ProtocolHTTP))
+	p.proxy.AddRoute(httpAddr, p.newConnectionHandler(ctx, cidrOnlyHandler, ProtocolHTTP))
 
 	// TLS listener (port 443 traffic): inspect SNI for domain allowlist
-	p.proxy.AddSNIMatchRoute(tlsAddr, func(_ context.Context, _ string) bool { return true }, newConnectionHandler(ctx, domainHandler, ProtocolTLS, p.metrics, p.limiter, p.logger, p.sandboxes, p.featureFlags))
-	p.proxy.AddRoute(tlsAddr, newConnectionHandler(ctx, cidrOnlyHandler, ProtocolTLS, p.metrics, p.limiter, p.logger, p.sandboxes, p.featureFlags))
+	p.proxy.AddSNIMatchRoute(tlsAddr, func(_ context.Context, _ string) bool { return true }, p.newConnectionHandler(ctx, domainHandler, ProtocolTLS))
+	p.proxy.AddRoute(tlsAddr, p.newConnectionHandler(ctx, cidrOnlyHandler, ProtocolTLS))
 
 	// Other listener (all other ports): CIDR-only check, no protocol inspection
 	// This prevents blocking on server-first protocols like SSH
-	p.proxy.AddRoute(otherAddr, newConnectionHandler(ctx, cidrOnlyHandler, ProtocolOther, p.metrics, p.limiter, p.logger, p.sandboxes, p.featureFlags))
+	p.proxy.AddRoute(otherAddr, p.newConnectionHandler(ctx, cidrOnlyHandler, ProtocolOther))
 
 	p.logger.Info(ctx, "TCP firewall proxy started",
 		zap.Uint16("http_port", p.httpPort),
@@ -132,25 +134,27 @@ var _ tcpproxy.Target = (*connectionHandler)(nil)
 type connectionHandler struct {
 	ctx context.Context //nolint:containedctx // base context for request tracing
 
-	handler      handlerFunc
-	protocol     Protocol
-	metrics      *Metrics
-	limiter      *connlimit.ConnectionLimiter
-	logger       logger.Logger
-	sandboxes    *sandbox.Map
-	featureFlags *featureflags.Client
+	handler       handlerFunc
+	protocol      Protocol
+	metrics       *Metrics
+	limiter       *connlimit.ConnectionLimiter
+	logger        logger.Logger
+	sandboxes     *sandbox.Map
+	featureFlags  *featureflags.Client
+	socks5Dialers *socks5DialerCache // stable egress IP proxy cache
 }
 
-func newConnectionHandler(ctx context.Context, handler handlerFunc, protocol Protocol, metrics *Metrics, limiter *connlimit.ConnectionLimiter, logger logger.Logger, sandboxes *sandbox.Map, featureFlags *featureflags.Client) *connectionHandler {
+func (p *Proxy) newConnectionHandler(ctx context.Context, handler handlerFunc, protocol Protocol) *connectionHandler {
 	return &connectionHandler{
-		ctx:          ctx,
-		handler:      handler,
-		protocol:     protocol,
-		metrics:      metrics,
-		limiter:      limiter,
-		logger:       logger,
-		sandboxes:    sandboxes,
-		featureFlags: featureFlags,
+		ctx:           ctx,
+		handler:       handler,
+		protocol:      protocol,
+		metrics:       p.metrics,
+		limiter:       p.limiter,
+		logger:        p.logger,
+		sandboxes:     p.sandboxes,
+		featureFlags:  p.featureFlags,
+		socks5Dialers: &p.socks5Dialers,
 	}
 }
 
@@ -202,6 +206,19 @@ func (t *connectionHandler) HandleConn(conn net.Conn) {
 
 	t.metrics.RecordConnectionsPerSandbox(ctx, count)
 	t.metrics.RecordConnection(ctx, t.protocol)
+
+	proxyAddr := t.featureFlags.StringFlag(ctx, featureflags.SandboxEgressProxy,
+		featureflags.TeamContext(sbx.Runtime.TeamID))
+	if proxyAddr != "" {
+		dialCtx, dialErr := t.socks5Dialers.Get(proxyAddr)
+		if dialErr != nil {
+			sbxLogger.Error(ctx, "failed to create SOCKS5 dialer for egress proxy",
+				zap.String("proxy_addr", proxyAddr),
+				zap.Error(dialErr))
+		} else {
+			ctx = withSOCKS5DialContext(ctx, dialCtx)
+		}
+	}
 
 	// Wrap the handler to release the connection slot when done
 	wrappedHandler := func(ctx context.Context, conn net.Conn, dstIP net.IP, dstPort int, sbx *sandbox.Sandbox, l logger.Logger, metrics *Metrics, protocol Protocol) {

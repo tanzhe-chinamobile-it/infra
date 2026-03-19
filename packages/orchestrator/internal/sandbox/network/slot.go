@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 
 	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/coreos/go-iptables/iptables"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -61,8 +63,8 @@ type Slot struct {
 
 	Firewall *Firewall
 
-	// firewallCustomRules is used to track if custom firewall rules are set for the slot and need a cleanup.
 	firewallCustomRules atomic.Bool
+	egressNATEnabled    atomic.Bool
 
 	vPeerIp net.IP
 	vEthIp  net.IP
@@ -317,24 +319,91 @@ func (s *Slot) ResetInternet(ctx context.Context) error {
 	))
 	defer span.End()
 
-	if !s.firewallCustomRules.CompareAndSwap(true, false) {
+	var errs []error
+
+	if err := s.DisableEgressNAT(); err != nil {
+		errs = append(errs, err)
+	}
+
+	if s.firewallCustomRules.CompareAndSwap(true, false) {
+		n, err := ns.GetNS(filepath.Join(netNamespacesDir, s.NamespaceID()))
+		if err != nil {
+			return errors.Join(append(errs, fmt.Errorf("failed to get slot network namespace '%s': %w", s.NamespaceID(), err))...)
+		}
+		defer n.Close()
+
+		err = n.Do(func(_ ns.NetNS) error {
+			return s.Firewall.ReplaceUserRules(nil, nil)
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed execution in network namespace '%s': %w", s.NamespaceID(), err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+const egressNATMark = "0x100"
+
+// EnableEgressNAT marks non-TCP traffic from this slot's veth for policy routing
+// through the egress NAT tunnel interface. Requires EGRESS_NAT_INTERFACE and
+// corresponding ip rule/route to be set up on the host.
+func (s *Slot) EnableEgressNAT() error {
+	if s.config.EgressNATInterface == "" {
 		return nil
 	}
 
-	n, err := ns.GetNS(filepath.Join(netNamespacesDir, s.NamespaceID()))
+	tables, err := iptables.New()
 	if err != nil {
-		return fmt.Errorf("failed to get slot network namespace '%s': %w", s.NamespaceID(), err)
+		return fmt.Errorf("error initializing iptables: %w", err)
 	}
-	defer n.Close()
 
-	err = n.Do(func(_ ns.NetNS) error {
-		return s.Firewall.ReplaceUserRules(nil, nil)
-	})
-	if err != nil {
-		return fmt.Errorf("failed execution in network namespace '%s': %w", s.NamespaceID(), err)
+	// Mark non-TCP forwarded packets from this sandbox for policy routing
+	if err := tables.Append("mangle", "FORWARD", "-i", s.VethName(), "!", "-p", "tcp", "-j", "MARK", "--set-mark", egressNATMark); err != nil {
+		return fmt.Errorf("error adding egress NAT mark rule: %w", err)
 	}
+
+	// Allow forwarding to/from the tunnel interface
+	iface := s.config.EgressNATInterface
+	if err := tables.Append("filter", "FORWARD", "-i", s.VethName(), "-o", iface, "-j", "ACCEPT"); err != nil {
+		return fmt.Errorf("error adding egress NAT forward rule: %w", err)
+	}
+
+	if err := tables.Append("filter", "FORWARD", "-i", iface, "-o", s.VethName(), "-j", "ACCEPT"); err != nil {
+		return fmt.Errorf("error adding egress NAT return forward rule: %w", err)
+	}
+
+	s.egressNATEnabled.Store(true)
 
 	return nil
+}
+
+func (s *Slot) DisableEgressNAT() error {
+	if !s.egressNATEnabled.CompareAndSwap(true, false) {
+		return nil
+	}
+
+	tables, err := iptables.New()
+	if err != nil {
+		return fmt.Errorf("error initializing iptables: %w", err)
+	}
+
+	var errs []error
+
+	if err := tables.Delete("mangle", "FORWARD", "-i", s.VethName(), "!", "-p", "tcp", "-j", "MARK", "--set-mark", egressNATMark); err != nil {
+		errs = append(errs, fmt.Errorf("error deleting egress NAT mark rule: %w", err))
+	}
+
+	iface := s.config.EgressNATInterface
+	if err := tables.Delete("filter", "FORWARD", "-i", s.VethName(), "-o", iface, "-j", "ACCEPT"); err != nil {
+		errs = append(errs, fmt.Errorf("error deleting egress NAT forward rule: %w", err))
+	}
+
+	if err := tables.Delete("filter", "FORWARD", "-i", iface, "-o", s.VethName(), "-j", "ACCEPT"); err != nil {
+		errs = append(errs, fmt.Errorf("error deleting egress NAT return forward rule: %w", err))
+	}
+
+	return errors.Join(errs...)
 }
 
 func getHostNetworkCIDR() *net.IPNet {

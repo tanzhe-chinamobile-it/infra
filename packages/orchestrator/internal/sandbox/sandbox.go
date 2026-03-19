@@ -380,6 +380,13 @@ func (f *Factory) CreateSandbox(
 		return nil, err
 	}
 
+	// Enable non-TCP egress NAT for teams with a stable egress proxy configured.
+	if proxyAddr := f.featureFlags.StringFlag(ctx, featureflags.SandboxEgressProxy, featureflags.TeamContext(runtime.TeamID)); proxyAddr != "" {
+		if err := ips.EnableEgressNAT(); err != nil {
+			return nil, fmt.Errorf("failed to enable egress NAT: %w", err)
+		}
+	}
+
 	cgroupHandle, cgroupFD := createCgroup(ctx, f.cgroupManager, sandboxFiles.SandboxCgroupName(), cleanup)
 	defer releaseCgroupFD(ctx, cgroupHandle, runtime.SandboxID)
 
@@ -659,6 +666,12 @@ func (f *Factory) ResumeSandbox(
 	}
 
 	telemetry.ReportEvent(ctx, "got network slot")
+
+	if proxyAddr := f.featureFlags.StringFlag(ctx, featureflags.SandboxEgressProxy, featureflags.TeamContext(runtime.TeamID)); proxyAddr != "" {
+		if err := ips.EnableEgressNAT(); err != nil {
+			return nil, fmt.Errorf("failed to enable egress NAT: %w", err)
+		}
+	}
 
 	overlay, err := overlayPromise.Wait(ctx)
 	if err != nil {

@@ -103,6 +103,11 @@ func proxy(ctx context.Context, conn net.Conn, upstreamAddr string, metrics *Met
 		Addr:        upstreamAddr,
 		DialTimeout: upstreamDialTimeout,
 	}
+
+	if dialCtx := socks5DialContextFromCtx(ctx); dialCtx != nil {
+		dp.DialContext = dialCtx
+	}
+
 	dp.HandleConn(conn)
 }
 
@@ -117,13 +122,15 @@ func proxyWithIPVerification(ctx context.Context, conn net.Conn, upstreamAddr st
 	tracker := metrics.TrackConnection(protocol)
 	defer tracker.Close(ctx)
 
-	// Use tcpproxy.DialProxy with a custom DialContext that verifies resolved IPs
 	dp := &tcpproxy.DialProxy{
 		Addr:        upstreamAddr,
 		DialTimeout: upstreamDialTimeout,
-		DialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {
-			// Use Go's net.Dialer which has built-in Happy Eyeballs (RFC 8305)
-			// This automatically tries multiple IPs with proper fallback
+	}
+
+	if dialCtx := socks5DialContextFromCtx(ctx); dialCtx != nil {
+		dp.DialContext = dialCtx
+	} else {
+		dp.DialContext = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
 			dialer := &net.Dialer{
 				Timeout: upstreamDialTimeout,
 				// ControlContext is called after DNS resolution but BEFORE the TCP connect() syscall.
@@ -154,8 +161,9 @@ func proxyWithIPVerification(ctx context.Context, conn net.Conn, upstreamAddr st
 			}
 
 			return dialer.DialContext(dialCtx, network, addr)
-		},
+		}
 	}
+
 	dp.HandleConn(conn)
 }
 
